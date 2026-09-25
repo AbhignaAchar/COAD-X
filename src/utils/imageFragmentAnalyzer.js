@@ -155,6 +155,35 @@ export async function analyzeUploadedFragmentedImage(img, file) {
     }
   }
 
+  // 3. Fallback for low-light, dark-field visual evidence, or solid dark images
+  if (components.length === 0) {
+    // Calculate global average color
+    let sumR = 0, sumG = 0, sumB = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      sumR += data[i];
+      sumG += data[i + 1];
+      sumB += data[i + 2];
+    }
+    const avgR = Math.round(sumR / totalPixels);
+    const avgG = Math.round(sumG / totalPixels);
+    const avgB = Math.round(sumB / totalPixels);
+
+    components.push({
+      labelId: 1,
+      pixelCount: totalPixels,
+      minX: 0,
+      maxX: processWidth - 1,
+      minY: 0,
+      maxY: processHeight - 1,
+      width: processWidth,
+      height: processHeight,
+      centroidX: Math.round(processWidth / 2),
+      centroidY: Math.round(processHeight / 2),
+      avgColor: { r: avgR, g: avgG, b: avgB },
+      borderPixels: []
+    });
+  }
+
   // Sort components by area descending and assign forensic IDs: F-001, F-002, ...
   components.sort((a, b) => b.pixelCount - a.pixelCount);
 
@@ -203,9 +232,10 @@ export async function analyzeUploadedFragmentedImage(img, file) {
   });
 
   // Calculate actual forensic provenance values
-  const contentPixels = totalPixels - gapPixelCount;
-  const directlyRecoveredPercent = parseFloat(((contentPixels / totalPixels) * 100).toFixed(1));
-  const inferredPercent = parseFloat(((gapPixelCount / totalPixels) * 100).toFixed(1));
+  const isDarkImage = gapPixelCount / totalPixels > 0.85;
+  const contentPixels = isDarkImage ? totalPixels : (totalPixels - gapPixelCount);
+  const directlyRecoveredPercent = isDarkImage ? 100.0 : parseFloat(((contentPixels / totalPixels) * 100).toFixed(1));
+  const inferredPercent = isDarkImage ? 0.0 : parseFloat(((gapPixelCount / totalPixels) * 100).toFixed(1));
   const unknownPercent = parseFloat((100 - directlyRecoveredPercent - inferredPercent).toFixed(1));
 
   const inputBlob = await new Promise(res => {
@@ -234,7 +264,7 @@ export async function analyzeUploadedFragmentedImage(img, file) {
     inputSha256,
     inputDataUrl: canvas.toDataURL('image/png'),
     rawImageData: imgData,
-    isGapMask: isGap,
+    isGapMask: isDarkImage ? new Uint8Array(totalPixels) : isGap,
     fragments,
     fragmentsDetected: fragments.length,
     regionsReconstructed: fragments.length,
@@ -242,7 +272,7 @@ export async function analyzeUploadedFragmentedImage(img, file) {
     forensicMetrics: {
       directlyRecoveredPercent,
       inferredPercent,
-      unknownPercent,
+      unknownPercent: Math.max(0, unknownPercent),
       overallStatus: 'COMPLETE'
     }
   };
@@ -380,11 +410,22 @@ function composeCleanCanvasWithoutGaps(cleanCtx, evidenceData, width, height) {
   const isCrack = new Uint8Array(total);
 
   // 1. Identify all dark/black crack pixels (threshold 58 to catch anti-aliased fringes)
+  let crackCount = 0;
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     const maxVal = Math.max(data[i], data[i + 1], data[i + 2]);
     if (maxVal < 58) {
       isCrack[p] = 1;
+      crackCount++;
     }
+  }
+
+  // If majority (>75%) of the image is dark, it's a low-light / dark scene, not a shattered crack image.
+  if (crackCount / total > 0.75) {
+    tCtx.putImageData(imgData, 0, 0);
+    cleanCtx.imageSmoothingEnabled = true;
+    cleanCtx.imageSmoothingQuality = 'high';
+    cleanCtx.drawImage(tempCanvas, 0, 0, width, height);
+    return;
   }
 
   // 2. Morphological dilation of 2 pixels around cracks to swallow all edge ringing/borders
