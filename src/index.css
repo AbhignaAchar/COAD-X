@@ -1,0 +1,288 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* COAD-X Forensic Glass — Light Command Center Theme Tokens */
+  --bg-page: #F5F8FC;
+  --bg-secondary: #EEF3F8;
+  --bg-card: #FFFFFF;
+  --bg-subtle: #F0F5FA;
+  
+  --border-color: #DCE5EF;
+  --border-focus: #0891B2;
+  --border-light: #E8EEF5;
+  
+  --navy-primary: #0F2747;
+  --navy-secondary: #173B63;
+  --cyan-primary: #0891B2;
+  --cyan-dark: #0E7490;
+  --cyan-light: #ECFEFF;
+  --cyan-border: #A5F3FC;
+  
+  --success: #16A34A;
+  --warning: #D97706;
+  --critical: #DC2626;
+  --processing: #2563EB;
+  
+  --text-primary: #0F172A;
+  --text-secondary: #64748B;
+  --text-muted: #94A3B8;
+  
+  --font-sans: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+}
+
+body {
+  background-color: #F5F8FC;
+  background-image: radial-gradient(rgba(14, 116, 144, 0.05) 1px, transparent 1px);
+  background-size: 24px 24px;
+  color: #0F172A;
+  font-family: var(--font-sans);
+  min-height: 100vh;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Light Forensic Professional Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #F5F8FC;
+}
+::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94A3B8;
+}
+
+/* Professional Forensic White Cards */
+.glass-panel {
+  background: #FFFFFF;
+  border: 1px solid #DCE5EF;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04), 0 1px 2px rgba(15, 23, 42, 0.02);
+}
+
+.glass-panel-interactive {
+  background: #FFFFFF;
+  border: 1px solid #DCE5EF;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.glass-panel-interactive:hover {
+  border-color: #0891B2;
+  box-shadow: 0 4px 14px rgba(8, 145, 178, 0.08);
+  transform: translateY(-1px);
+}
+
+.text-navy {
+  color: #0F2747;
+}
+
+.text-mono {
+  font-family: var(--font-mono);
+}
+
+/* Grid & Layout */
+.app-container {
+  display: flex;
+  min-height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  background-color: #F5F8FC;
+  background-image: radial-gradient(rgba(14, 116, 144, 0.05) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-y: auto;
+  height: 100vh;
+  background-color: transparent;
+}
+
+.page-container {
+  padding: 1.75rem 2rem;
+  max-width: 1400px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+/* Custom Professional Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.55rem 1.15rem;
+  border-radius: 8px;
+  font-weight: 500;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+  border: 1px solid transparent;
+  outline: none;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-cyan, .btn-primary {
+  background: #0891B2;
+  color: #FFFFFF;
+  border-color: #0891B2;
+  box-shadow: 0 1px 2px rgba(8, 145, 178, 0.2);
+}
+.btn-cyan:hover:not(:disabled), .btn-primary:hover:not(:disabled) {
+  background: #0E7490;
+  border-color: #0E7490;
+  box-shadow: 0 2px 6px rgba(8, 145, 178, 0.25);
+}
+
+.btn-outline, .btn-secondary {
+  background: #FFFFFF;
+  border-color: #DCE5EF;
+  color: #0F172A;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+}
+.btn-outline:hover:not(:disabled), .btn-secondary:hover:not(:disabled) {
+  border-color: #CBD5E1;
+  color: #0891B2;
+  background: #F8FAFC;
+}
+
+.btn-danger {
+  background: #FEE2E2;
+  border-color: #FECACA;
+  color: #DC2626;
+}
+.btn-danger:hover:not(:disabled) {
+  background: #FCA5A5;
+  color: #B91C1C;
+}
+
+/* Form Controls */
+.input-field {
+  width: 100%;
+  padding: 0.55rem 0.95rem;
+  background: #FFFFFF;
+  border: 1px solid #DCE5EF;
+  border-radius: 8px;
+  color: #0F172A;
+  font-family: inherit;
+  font-size: 0.875rem;
+  transition: all 0.15s ease;
+}
+.input-field:focus {
+  outline: none;
+  border-color: #0891B2;
+  box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.12);
+}
+
+/* Professional Forensic Table */
+.custom-table-container {
+  width: 100%;
+  overflow-x: auto;
+  border-radius: 10px;
+  border: 1px solid #DCE5EF;
+  background: #FFFFFF;
+}
+.custom-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 0.875rem;
+}
+.custom-table th {
+  background: #F8FAFC;
+  color: #64748B;
+  padding: 0.75rem 1rem;
+  font-weight: 600;
+  border-bottom: 1px solid #DCE5EF;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+}
+.custom-table td {
+  padding: 0.8rem 1rem;
+  border-bottom: 1px solid #EEF3F8;
+  color: #0F172A;
+}
+.custom-table tr:last-child td {
+  border-bottom: none;
+}
+.custom-table tr:hover td {
+  background: #F8FAFC;
+}
+
+/* Professional Forensic Status Badges */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.badge-success {
+  background: #F0FDF4;
+  color: #16A34A;
+  border: 1px solid #BBF7D0;
+}
+.badge-warning {
+  background: #FFFBEB;
+  color: #D97706;
+  border: 1px solid #FDE68A;
+}
+.badge-danger {
+  background: #FEF2F2;
+  color: #DC2626;
+  border: 1px solid #FECACA;
+}
+.badge-info, .badge-cyan {
+  background: #ECFEFF;
+  color: #0891B2;
+  border: 1px solid #A5F3FC;
+}
+.badge-processing {
+  background: #EFF6FF;
+  color: #2563EB;
+  border: 1px solid #BFDBFE;
+}
+.badge-purple {
+  background: #F5F3FF;
+  color: #7C3AED;
+  border: 1px solid #DDD6FE;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: scale(0.98); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes slideIn {
+  from { transform: translateY(10px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.animate-slideIn {
+  animation: slideIn 0.25s ease-out forwards;
+}
