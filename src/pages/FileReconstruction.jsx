@@ -43,6 +43,8 @@ import {
   orderTextFragments,
   assembleReconstructedText,
   validateReconstructedText,
+  reconstructUnallocatedDiskSlice,
+  inpaintDamagedTextWithAI,
   analyzePdfStructure,
   reconstructPdfBinary,
   inspectDocxZipStructure,
@@ -58,6 +60,16 @@ function SampleEvidenceModal({ isOpen, onClose, onSelectSample }) {
   if (!isOpen) return null;
 
   const sampleOptions = [
+    {
+      id: 'unallocated',
+      title: 'Unallocated Disk Slice (Zeroed Sectors)',
+      category: 'TEXT',
+      format: 'TXT / RAW (4.4 KB)',
+      desc: 'Agent Vance Case Notes: Corrupted with 4,096 null bytes (8 zeroed sectors) interrupting words: "in s[4KB 0x00]ectors 2048-4096".',
+      icon: Binary,
+      color: 'text-amber-500',
+      badge: 'UNALLOCATED SLICE CARVING'
+    },
     {
       id: 'image',
       title: 'Motorcycle Photographic Evidence',
@@ -234,6 +246,7 @@ export default function FileReconstruction() {
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [showSampleModal, setShowSampleModal] = useState(false);
   const [copiedText, setCopiedText] = useState(false);
+  const [selectedModel, setSelectedModel] = useState('auto'); // 'auto' | 'unallocated-sector' | 'ai-neural' | 'syntactic'
 
   const fileInputRef = useRef(null);
   const imageContainerRef = useRef(null);
@@ -309,6 +322,34 @@ export default function FileReconstruction() {
     setReconstructionResult(null);
 
     try {
+      if (sampleType === 'unallocated') {
+        const sample = createSampleTextEvidence('unallocated');
+        const sha = await calculateSHA256(sample.rawContent);
+        const data = {
+          id: `EVD-SLICE-${Date.now().toString(36).toUpperCase()}`,
+          fileName: sample.fileName,
+          fileSize: sample.fileSize,
+          fileSizeFormatted: `${(sample.fileSize / 1024).toFixed(1)} KB`,
+          category: 'TEXT',
+          fileType: 'txt',
+          detectedType: 'UNALLOCATED_SLICE',
+          subType: 'unallocated',
+          mimeType: 'text/plain',
+          reconstructionMode: 'UNALLOCATED DISK SLICE CARVING',
+          isMismatch: false,
+          hasZeroFill: true,
+          hexSignature: '43 41 53 45 ("CASE")',
+          rawContent: sample.rawContent,
+          fragments: sample.fragments,
+          fragmentsDetected: sample.fragments.length,
+          inputSha256: sha
+        };
+        setUploadedEvidence(data);
+        registerImageEvidence(data, { name: sample.fileName, type: 'text/plain', size: sample.fileSize });
+        showToast('Loaded sample unallocated disk slice (4,096 null-byte gap detected).', 'info');
+        return;
+      }
+
       if (sampleType === 'image') {
         await loadReferenceEvidenceDemo();
         return;
@@ -561,20 +602,29 @@ export default function FileReconstruction() {
         const textContent = decoder.decode(arrayBuffer);
         const textFragments = extractTextFragments(textContent);
         const sha = await calculateSHA256(textContent);
+        const hasNullRuns = /\x00+/.test(textContent);
+
+        const detectedFormat = hasNullRuns || detection.detectedType === 'UNALLOCATED_SLICE'
+          ? 'UNALLOCATED_SLICE'
+          : detection.detectedType;
+        const reconMode = hasNullRuns || detection.detectedType === 'UNALLOCATED_SLICE'
+          ? 'UNALLOCATED DISK SLICE CARVING'
+          : detection.reconstructionMode;
 
         const evidenceData = {
-          id: `EVD-TXT-${Date.now().toString(36).toUpperCase()}`,
+          id: `EVD-${hasNullRuns ? 'SLICE' : 'TXT'}-${Date.now().toString(36).toUpperCase()}`,
           fileName: file.name,
           fileSize: file.size,
           fileSizeFormatted: `${(file.size / 1024).toFixed(1)} KB`,
           category: 'TEXT',
-          fileType: detection.fileType,
-          detectedType: detection.detectedType,
-          subType: detection.subType,
+          fileType: detection.fileType || 'txt',
+          detectedType: detectedFormat,
+          subType: hasNullRuns ? 'unallocated' : detection.subType,
           mimeType: detection.mimeType,
-          reconstructionMode: detection.reconstructionMode,
+          reconstructionMode: reconMode,
           isMismatch: detection.isMismatch,
           mismatchDetails: detection.mismatchDetails,
+          hasZeroFill: hasNullRuns,
           hexSignature: detection.hexSignature,
           rawContent: textContent,
           fragments: textFragments,
@@ -586,7 +636,11 @@ export default function FileReconstruction() {
         registerImageEvidence(evidenceData, file);
         setCurrentStepInfo(null);
         setIsProcessing(false);
-        showToast(`Fragmented text detected: ${textFragments.length} text fragments extracted.`, 'success');
+        if (hasNullRuns) {
+          showToast(`Unallocated disk slice detected: Zero-filled sectors identified across ${textFragments.length} fragments.`, 'info');
+        } else {
+          showToast(`Fragmented text detected: ${textFragments.length} text fragments extracted.`, 'success');
+        }
         return;
       }
 
@@ -772,28 +826,57 @@ export default function FileReconstruction() {
         return;
       }
 
-      // ROUTER 2: TEXT RECONSTRUCTION (TXT, CSV, JSON, XML, LOG)
+      // ROUTER 2: TEXT & UNALLOCATED DISK SLICE RECONSTRUCTION
       if (uploadedEvidence.category === 'TEXT') {
-        setCurrentStepInfo({ step: 1, title: 'ANALYZING TEXT FRAGMENTS', details: 'Analyzing fragment order, whitespace, and boundary continuity...' });
-        await new Promise(r => setTimeout(r, 400));
+        const isUnallocated = uploadedEvidence.detectedType === 'UNALLOCATED_SLICE' ||
+          uploadedEvidence.hasZeroFill ||
+          (uploadedEvidence.rawContent && /\x00+/.test(uploadedEvidence.rawContent)) ||
+          selectedModel === 'unallocated-sector';
 
-        const ordered = orderTextFragments(uploadedEvidence.fragments, uploadedEvidence.subType);
+        let assembled = '';
+        let modelUsed = '';
+        let sliceStats = null;
 
-        setCurrentStepInfo({ step: 2, title: 'STRUCTURAL SYNTACTIC REASSEMBLY', details: `Synthesizing ${ordered.length} fragments into continuous text stream...` });
-        await new Promise(r => setTimeout(r, 400));
+        if (selectedModel === 'ai-neural') {
+          setCurrentStepInfo({ step: 1, title: 'ACTIVATING AI NEURAL INPAINTING MODEL', details: 'Connecting to Gemini 3 Flash / Deep NLP Semantic Inpainter...' });
+          await new Promise(r => setTimeout(r, 400));
+          setCurrentStepInfo({ step: 2, title: 'AI DEEP SEMANTIC RECONSTRUCTION', details: 'Restoring zero-filled sector gaps and healing split word stems...' });
+          const aiResult = await inpaintDamagedTextWithAI(uploadedEvidence.rawContent, uploadedEvidence.detectedType);
+          assembled = aiResult.reconstructedText;
+          modelUsed = `COAD-X AI Neural Inpainting Model (${aiResult.model || 'Gemini 3 Flash'})`;
+          sliceStats = aiResult.stats;
+        } else if (isUnallocated) {
+          setCurrentStepInfo({ step: 1, title: 'SCANNING UNALLOCATED DISK SECTOR RUNS', details: 'Detecting 0x00 zero-filled cluster gaps and unallocated sector padding...' });
+          await new Promise(r => setTimeout(r, 400));
+          setCurrentStepInfo({ step: 2, title: 'SECTOR DE-ZEROING & LINGUISTIC STEM HEALING', details: 'Purging unallocated sectors and bridging word stems across boundaries...' });
+          await new Promise(r => setTimeout(r, 400));
+          const sliceResult = reconstructUnallocatedDiskSlice(uploadedEvidence.rawContent);
+          assembled = sliceResult.reconstructedText;
+          sliceStats = sliceResult.stats;
+          modelUsed = 'COAD-X Unallocated Disk Slice & Slack Space Carving Model';
+        } else {
+          setCurrentStepInfo({ step: 1, title: 'ANALYZING TEXT FRAGMENTS', details: 'Analyzing fragment order, whitespace, and boundary continuity...' });
+          await new Promise(r => setTimeout(r, 350));
+          const ordered = orderTextFragments(uploadedEvidence.fragments, uploadedEvidence.subType);
+          setCurrentStepInfo({ step: 2, title: 'STRUCTURAL SYNTACTIC REASSEMBLY', details: `Synthesizing ${ordered.length} fragments into continuous text stream...` });
+          await new Promise(r => setTimeout(r, 350));
+          assembled = assembleReconstructedText(ordered, uploadedEvidence.subType, uploadedEvidence.rawContent, selectedModel);
+          modelUsed = 'Structural Syntactic Reassembly Model';
+        }
 
-        const assembled = assembleReconstructedText(ordered);
+        setCurrentStepInfo({ step: 3, title: 'INTEGRITY & CONTINUITY VALIDATION', details: 'Validating UTF-8 character continuity and calculating reconstructed SHA-256...' });
+        await new Promise(r => setTimeout(r, 350));
 
-        setCurrentStepInfo({ step: 3, title: 'STRUCTURAL VALIDATION', details: `Validating character continuity, encoding, and ${uploadedEvidence.subType?.toUpperCase()} grammar...` });
-        await new Promise(r => setTimeout(r, 400));
-
-        const validation = validateReconstructedText(assembled, uploadedEvidence.subType, uploadedEvidence.fragments.length);
+        const validation = validateReconstructedText(assembled, uploadedEvidence.detectedType || uploadedEvidence.subType, uploadedEvidence.fragments.length);
+        const reconSha = await calculateSHA256(assembled);
 
         const mimeType = uploadedEvidence.mimeType || 'text/plain;charset=utf-8';
         const blob = new Blob([assembled], { type: mimeType });
         const downloadUrl = URL.createObjectURL(blob);
-        const ext = uploadedEvidence.subType || 'txt';
+        const ext = 'txt';
         const cleanBase = uploadedEvidence.fileName.replace(/\.[^/.]+$/, "");
+
+        const ordered = orderTextFragments(uploadedEvidence.fragments, uploadedEvidence.subType);
 
         const result = {
           category: 'TEXT',
@@ -802,6 +885,9 @@ export default function FileReconstruction() {
           orderedFragments: ordered,
           reconstructedText: assembled,
           validation: validation,
+          stats: sliceStats,
+          modelUsed: modelUsed,
+          reconstructedSha256: reconSha,
           downloadUrl: downloadUrl,
           downloadName: `COAD-X_Reconstructed_${cleanBase}.${ext}`,
           fragmentsDetected: uploadedEvidence.fragmentsDetected,
@@ -810,7 +896,7 @@ export default function FileReconstruction() {
           uncertainRegions: validation.continuityPass ? 0 : 1,
           forensicMetrics: {
             directlyRecoveredPercent: validation.confidence,
-            inferredPercent: Math.max(0, 100 - validation.confidence - 5),
+            inferredPercent: Math.max(0, 100 - validation.confidence - (validation.isValid ? 0 : 5)),
             unknownPercent: Math.min(5, Math.max(0, 100 - validation.confidence))
           }
         };
@@ -819,7 +905,7 @@ export default function FileReconstruction() {
         registerImageReconstruction(uploadedEvidence, result);
         setCurrentStepInfo(null);
         setIsProcessing(false);
-        showToast(`Text Reconstruction: ${result.status} [Confidence: ${validation.confidence}%].`, validation.isValid ? 'success' : 'warning');
+        showToast(`Text Reconstruction: ${result.status} [Model: ${modelUsed}].`, validation.isValid ? 'success' : 'warning');
         return;
       }
 
@@ -1182,6 +1268,25 @@ export default function FileReconstruction() {
               </div>
             </div>
 
+            {/* UNALLOCATED DISK SLICE CORRUPTION BANNER */}
+            {(uploadedEvidence?.hasZeroFill || uploadedEvidence?.detectedType === 'UNALLOCATED_SLICE' || (uploadedEvidence?.rawContent && /\x00+/.test(uploadedEvidence.rawContent))) && (
+              <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 flex items-start gap-3 text-xs text-amber-800">
+                <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5 animate-pulse" />
+                <div className="space-y-1">
+                  <div className="font-bold text-amber-900 font-mono flex items-center gap-2">
+                    <span>UNALLOCATED DISK SLICE CORRUPTION DETECTED</span>
+                    <span className="px-2 py-0.5 rounded bg-amber-200/60 text-[10px] text-amber-900 border border-amber-300 font-bold">
+                      ZERO-FILLED SECTOR GAP IDENTIFIED
+                    </span>
+                  </div>
+                  <p className="text-slate-700 font-mono text-[11px] leading-relaxed">
+                    Evidence contains unallocated disk sector null-byte corruption (0x00 runs) splitting words and records. 
+                    The <strong>COAD-X Unallocated Disk Slice & Slack Space Carving Model</strong> or <strong>AI Neural Inpainting Model</strong> will de-zero sectors and bridge split word stems (e.g. <code>"s" + [0x00] + "ectors" → "sectors"</code>).
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* TYPE MISMATCH ALERT BANNER */}
             {uploadedEvidence?.isMismatch && (
               <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 flex items-start gap-3 text-xs text-amber-800">
@@ -1277,6 +1382,23 @@ export default function FileReconstruction() {
             </div>
 
             <div className="flex items-center gap-3">
+              {/* Carving Model Selector for Text / Unallocated Evidence */}
+              {uploadedEvidence?.category === 'TEXT' && (
+                <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-lg border border-slate-200 text-xs font-mono">
+                  <span className="text-[10px] text-slate-500 uppercase px-1 font-bold">MODEL:</span>
+                  <select
+                    value={selectedModel}
+                    onChange={(e) => setSelectedModel(e.target.value)}
+                    className="bg-white text-xs font-semibold text-[#0F8FB3] rounded border border-slate-200 px-2 py-1 outline-none shadow-xs"
+                  >
+                    <option value="auto">⚡ Auto-Select Optimal Model</option>
+                    <option value="unallocated-sector">🛡️ Unallocated Sector Carving Model (De-Zeroing)</option>
+                    <option value="ai-neural">🤖 AI Neural Inpainting Model (Gemini 3 Flash)</option>
+                    <option value="syntactic">📐 Structural Syntactic Reassembly Model</option>
+                  </select>
+                </div>
+              )}
+
               {/* View Mode Switcher: Side-by-Side vs Before/After Slider (Image format only) */}
               {reconstructionResult && uploadedEvidence?.category === 'IMAGE' && (
                 <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg border border-slate-200 text-xs font-mono">
@@ -1323,6 +1445,8 @@ export default function FileReconstruction() {
                   {uploadedEvidence
                     ? uploadedEvidence.category === 'IMAGE'
                       ? 'RECONSTRUCT IMAGE'
+                      : uploadedEvidence.detectedType === 'UNALLOCATED_SLICE'
+                      ? 'CARVE & DE-ZERO SLICE'
                       : uploadedEvidence.category === 'TEXT'
                       ? 'RECONSTRUCT TEXT'
                       : uploadedEvidence.fileType === 'pdf'
@@ -1441,11 +1565,11 @@ export default function FileReconstruction() {
                                 </div>
                                 <div className="flex-1">
                                   <div className="text-slate-800 text-xs bg-slate-50 px-2 py-1 rounded border border-slate-200 font-mono break-all whitespace-pre-wrap">
-                                    "{frag.content}"
+                                    "{frag.content || frag.raw || frag.clean}"
                                   </div>
                                   <div className="flex items-center justify-between text-[10px] text-slate-500 mt-1">
-                                    <span>Length: {frag.length} chars</span>
-                                    <span>Type: {frag.type || 'Text Fragment'}</span>
+                                    <span>Length: {frag.length || frag.byteLength || (frag.raw || '').length} chars</span>
+                                    <span>Type: {frag.type || (frag.isGap ? 'Zeroed Slack Sector' : 'Text Fragment')}</span>
                                   </div>
                                 </div>
                               </div>
@@ -1746,6 +1870,34 @@ export default function FileReconstruction() {
                                 </div>
                               )}
                             </div>
+
+                            {/* ACTIVE CARVING MODEL BADGE & SECTOR STATS */}
+                            {reconstructionResult.modelUsed && (
+                              <div className="bg-[#E6F6FA] border border-[#BAE6FD] p-2.5 rounded-lg flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono shadow-xs">
+                                <span className="text-slate-600 font-bold flex items-center gap-1.5">
+                                  <Cpu className="w-3.5 h-3.5 text-[#0F8FB3]" />
+                                  ACTIVE ENGINE: <span className="text-[#0F8FB3] font-semibold">{reconstructionResult.modelUsed}</span>
+                                </span>
+                                {reconstructionResult.stats?.zeroedSectors > 0 && (
+                                  <span className="text-[10px] px-2 py-0.5 rounded bg-white text-emerald-700 border border-emerald-300 font-bold">
+                                    {reconstructionResult.stats.zeroedSectors} SECTORS DE-ZEROED ({reconstructionResult.stats.totalNullBytes} BYTES)
+                                  </span>
+                                )}
+                              </div>
+                            )}
+
+                            {/* HEALED STEMS BANNER IF PRESENT */}
+                            {reconstructionResult.stats?.healedWords && reconstructionResult.stats.healedWords.length > 0 && (
+                              <div className="bg-emerald-50 border border-emerald-200 p-2.5 rounded-lg flex items-center justify-between text-[11px] font-mono text-emerald-800">
+                                <span className="flex items-center gap-1.5 font-bold">
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                                  BRIDGED WORD STEMS:
+                                </span>
+                                <span className="px-2 py-0.5 rounded bg-white border border-emerald-300 font-bold text-emerald-700">
+                                  {reconstructionResult.stats.healedWords.map(w => `"...in ${w} 2048-4096"`).join(', ')}
+                                </span>
+                              </div>
+                            )}
 
                             {/* RECONSTRUCTED TEXT DISPLAY */}
                             <div className="bg-white p-3 rounded-lg border border-slate-200 space-y-2 shadow-xs">

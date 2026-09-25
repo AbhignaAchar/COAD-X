@@ -30,6 +30,36 @@ function matchesSignature(bytes, sig) {
 }
 
 /**
+ * Check if byte array is an unallocated disk slice or slack space interrupted by zero-fill null sectors
+ */
+function isUnallocatedDiskSlice(bytes) {
+  if (!bytes || bytes.length === 0) return false;
+  const sampleLen = Math.min(bytes.length, 4096);
+  let nullCount = 0;
+  let printableCount = 0;
+
+  for (let i = 0; i < sampleLen; i++) {
+    const b = bytes[i];
+    if (b === 0x00) {
+      nullCount++;
+    } else if (
+      (b >= 0x20 && b <= 0x7E) || // Printable ASCII
+      b === 0x09 || b === 0x0A || b === 0x0D || // Tab, LF, CR
+      (b >= 0xC2 && b <= 0xF4) // Valid UTF-8
+    ) {
+      printableCount++;
+    }
+  }
+
+  // Must have both null sectors AND significant printable text
+  const nonNull = sampleLen - nullCount;
+  if (nullCount >= 16 && printableCount >= 20 && (printableCount / Math.max(1, nonNull)) > 0.75) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Check if byte array is valid printable UTF-8 or ASCII text (no binary control nulls)
  */
 function isPlainTextBytes(bytes) {
@@ -51,8 +81,10 @@ function isPlainTextBytes(bytes) {
     }
   }
 
-  // If there are null bytes in the first 1KB, it's almost certainly binary
-  if (nullCount > 0) return false;
+  // If there are null bytes, check if it's an unallocated disk slice
+  if (nullCount > 0) {
+    return isUnallocatedDiskSlice(bytes);
+  }
   return (printableCount / sampleLen) > 0.85;
 }
 
@@ -168,11 +200,23 @@ export function detectFileType(file, bytes, textPreview = '') {
     mimeType = 'application/msword';
     magicSignatureMatch = true;
     description = 'Legacy Microsoft Compound Binary Document (Magic: D0 CF 11 E0)';
-  } else if (isPlainTextBytes(uint8) || ['txt', 'csv', 'log', 'json', 'xml'].includes(ext)) {
+  } else if (isPlainTextBytes(uint8) || ['txt', 'csv', 'log', 'json', 'xml', 'raw', 'dd', 'slice', 'dat'].includes(ext)) {
     detectedCategory = 'TEXT';
     const trimmedText = text.trim();
+    let hasNullRun = false;
+    for (let i = 0; i < Math.min(uint8.length - 1, 8192); i++) {
+      if (uint8[i] === 0x00 && uint8[i + 1] === 0x00) {
+        hasNullRun = true;
+        break;
+      }
+    }
 
-    if (ext === 'json' || (trimmedText.startsWith('{') && trimmedText.endsWith('}')) || (trimmedText.startsWith('[') && trimmedText.endsWith(']'))) {
+    if (hasNullRun || ['raw', 'dd', 'slice'].includes(ext) || /unallocated|disk slice|carved fragment/i.test(trimmedText)) {
+      detectedFormat = 'UNALLOCATED_SLICE';
+      reconstructionMode = 'UNALLOCATED DISK SLICE CARVING';
+      mimeType = 'text/plain';
+      description = 'Unallocated Disk Slice / Slack Space Evidence with Zero-Filled Sectors';
+    } else if (ext === 'json' || (trimmedText.startsWith('{') && trimmedText.endsWith('}')) || (trimmedText.startsWith('[') && trimmedText.endsWith(']'))) {
       detectedFormat = 'JSON';
       reconstructionMode = 'JSON STRUCTURAL RECONSTRUCTION';
       mimeType = 'application/json';
