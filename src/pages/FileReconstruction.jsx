@@ -51,6 +51,7 @@ import {
   reconstructDocxDocument,
   createSampleTextEvidence,
   createSamplePdfEvidence,
+  createSampleCorruptedPdfEvidence,
   createSampleDocxEvidence
 } from '../utils/documentReconstructionEngine';
 import { calculateSHA256 } from '../utils/forensicEngine';
@@ -119,6 +120,16 @@ function SampleEvidenceModal({ isOpen, onClose, onSelectSample }) {
       icon: File,
       color: 'text-rose-400',
       badge: 'PDF STRUCTURAL RECONSTRUCTION'
+    },
+    {
+      id: 'corrupted_pdf',
+      title: 'Corrupted / Damaged PDF Document',
+      category: 'DOCUMENT',
+      format: 'PDF (1.4 KB)',
+      desc: 'Damaged PDF file with missing %PDF header offset, broken xref table, and missing %%EOF trailer. Auto-repaired by PDF Structural Engine.',
+      icon: AlertTriangle,
+      color: 'text-amber-400',
+      badge: 'CORRUPTED PDF AUTO-REPAIR'
     },
     {
       id: 'docx',
@@ -459,6 +470,39 @@ export default function FileReconstruction() {
         setUploadedEvidence(data);
         registerImageEvidence(data, { name: sample.fileName, type: 'application/pdf', size: sample.fileSize });
         showToast(`Loaded sample fragmented PDF: ${pdfAnalysis.objects.length} binary objects.`, 'info');
+      } else if (sampleType === 'corrupted_pdf') {
+        const sample = createSampleCorruptedPdfEvidence();
+        const pdfAnalysis = analyzePdfStructure(sample.bytes);
+        const sha = await calculateSHA256(sample.bytes);
+        const data = {
+          id: `EVD-CORRUPT-PDF-${Date.now().toString(36).toUpperCase()}`,
+          fileName: sample.fileName,
+          fileSize: sample.fileSize,
+          fileSizeFormatted: `${(sample.fileSize / 1024).toFixed(1)} KB`,
+          category: 'DOCUMENT',
+          fileType: 'pdf',
+          detectedType: 'PDF (CORRUPTED)',
+          mimeType: 'application/pdf',
+          reconstructionMode: 'CORRUPTED PDF STRUCTURAL AUTO-REPAIR',
+          isMismatch: false,
+          isCorruptedPdf: true,
+          hexSignature: '5B 43 4F 52 (CORRUPTED OFFSET)',
+          rawBytes: sample.bytes,
+          pdfAnalysis: pdfAnalysis,
+          fragments: pdfAnalysis.objects.map(obj => ({
+            id: `PDF-OBJ-${obj.id}`,
+            label: obj.preview || `Salvaged Object ${obj.id}`,
+            type: obj.type,
+            offset: obj.offset,
+            length: obj.length,
+            preview: obj.bodyPreview || obj.preview
+          })),
+          fragmentsDetected: pdfAnalysis.objects.length,
+          inputSha256: sha
+        };
+        setUploadedEvidence(data);
+        registerImageEvidence(data, { name: sample.fileName, type: 'application/pdf', size: sample.fileSize });
+        showToast(`Loaded corrupted PDF evidence: ${pdfAnalysis.objects.length} salvaged objects/sectors ready for structural repair.`, 'warning');
       } else if (sampleType === 'docx') {
         const sample = createSampleDocxEvidence();
         const docxAnalysis = inspectDocxZipStructure(sample.bytes);

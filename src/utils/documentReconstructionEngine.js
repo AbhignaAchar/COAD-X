@@ -578,6 +578,50 @@ export function analyzePdfStructure(bytes, rawText) {
     });
   }
 
+  // Fallback for corrupted PDFs where endobj tags are missing or stream objects are broken
+  if (objects.length === 0) {
+    const looseObjRegex = /(\d+)\s+(\d+)\s+obj([\s\S]*?)(?=\d+\s+\d+\s+obj|xref|trailer|%%EOF|$)/g;
+    while ((m = looseObjRegex.exec(text)) !== null) {
+      const objId = parseInt(m[1], 10);
+      const gen = parseInt(m[2], 10);
+      const body = m[3];
+      const isStream = body.includes('stream');
+      const typeMatch = body.match(/\/Type\s*\/([A-Za-z0-9]+)/);
+      const objType = typeMatch ? typeMatch[1] : (isStream ? 'Stream' : 'Corrupted Object');
+
+      objects.push({
+        id: objId,
+        gen,
+        type: objType,
+        hasStream: isStream,
+        bodyPreview: body.trim().slice(0, 80),
+        offset: m.index,
+        preview: `Salvaged Object ${objId} (${objType})`
+      });
+    }
+  }
+
+  // If still no objects found, slice binary byte stream into 512-byte sector fragments for structural carving
+  if (objects.length === 0) {
+    const totalBytes = bytes ? bytes.length : text.length;
+    const chunkSize = 512;
+    const chunkCount = Math.max(1, Math.ceil(totalBytes / chunkSize));
+
+    for (let c = 0; c < chunkCount; c++) {
+      const offset = c * chunkSize;
+      const len = Math.min(chunkSize, totalBytes - offset);
+      objects.push({
+        id: c + 1,
+        gen: 0,
+        type: c === 0 ? 'Header Sector' : 'Corrupted Binary Stream Block',
+        hasStream: true,
+        bodyPreview: `Binary Sector ${c + 1} (${len} Bytes at Offset 0x${offset.toString(16).toUpperCase()})`,
+        offset,
+        preview: `Sector ${c + 1} (${c === 0 ? 'Header' : 'Payload Block'})`
+      });
+    }
+  }
+
   const hasCatalog = objects.some(o => o.type === 'Catalog' || text.includes('/Type /Catalog'));
   const hasPages = objects.some(o => o.type === 'Pages' || text.includes('/Type /Pages'));
   const hasPage = objects.some(o => o.type === 'Page' || text.includes('/Type /Page'));
@@ -587,11 +631,13 @@ export function analyzePdfStructure(bytes, rawText) {
   const hasXref = text.includes('xref') || text.includes('/Type /XRef');
   const hasTrailer = text.includes('trailer') || text.includes('/Root');
   const hasEof = text.includes('%%EOF');
+  const isCorrupted = !hasPdfHeader || !hasEof || !hasXref;
 
   return {
     header: headerVersion,
     hasHeader: hasPdfHeader,
     hasPdfHeader: hasPdfHeader,
+    isCorruptedPdf: isCorrupted,
     objectsCount: objects.length,
     objects,
     hasCatalog,
@@ -1153,5 +1199,45 @@ export function createSampleDocxEvidence() {
     rawBytes: docxBytes,
     content: documentXml,
     rawContent: documentXml
+  };
+}
+
+/**
+ * Sample Corrupted / Damaged PDF Evidence (Truncated binary streams, missing %%EOF and broken xref table)
+ */
+export function createSampleCorruptedPdfEvidence() {
+  const corruptedPdfSource = `[CORRUPTED_PDF_HEADER_OFFSET]\x00\x00\x00%PDF-1.4-DAMAGED
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+4 0 obj
+<< /Length 190 >>
+stream
+BT
+/F1 18 Tf
+50 720 Td
+(CORRUPTED FORENSIC PDF EVIDENCE) Tj
+0 -30 Td
+/F1 12 Tf
+(Missing %%EOF Trailer and Corrupted xref table successfully repaired by COAD-X.) Tj
+ET
+endstream
+[TRUNCATED_BINARY_BYTE_STREAM_0x8849]`;
+
+  const bytes = new TextEncoder().encode(corruptedPdfSource);
+  return {
+    fileName: 'corrupted_evidence_dossier.pdf',
+    name: 'corrupted_evidence_dossier.pdf',
+    type: 'application/pdf',
+    fileSize: bytes.length,
+    size: bytes.length,
+    bytes: bytes,
+    rawBytes: bytes,
+    content: corruptedPdfSource,
+    rawContent: corruptedPdfSource,
+    isCorruptedPdf: true
   };
 }

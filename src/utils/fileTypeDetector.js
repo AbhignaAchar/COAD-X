@@ -159,14 +159,19 @@ export function detectFileType(file, bytes, textPreview = '') {
     description = 'WebP Visual Container (Magic: RIFF....WEBP)';
   } else if (
     matchesSignature(uint8, SIGNATURES.PDF) ||
-    (uint8.length > 10 && (text.slice(0, 1024).includes('%PDF-') || text.startsWith('%PDF-')))
+    ext === 'pdf' ||
+    declaredMime === 'application/pdf' ||
+    (uint8.length > 4 && text.includes('%PDF'))
   ) {
+    const hasCleanMagic = matchesSignature(uint8, SIGNATURES.PDF);
     detectedCategory = 'DOCUMENT';
     detectedFormat = 'PDF';
     reconstructionMode = 'PDF STRUCTURAL RECONSTRUCTION';
     mimeType = 'application/pdf';
     magicSignatureMatch = true;
-    description = 'Adobe Portable Document Format (Magic: %PDF)';
+    description = hasCleanMagic
+      ? 'Adobe Portable Document Format (Magic: %PDF)'
+      : 'Corrupted / Damaged PDF Document (Structural Engine Auto-Repair Active)';
   } else if (
     matchesSignature(uint8, SIGNATURES.ZIP_PK) ||
     matchesSignature(uint8, SIGNATURES.ZIP_EMPTY) ||
