@@ -73,6 +73,7 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
 
   const recognitionRef = useRef(null);
   const chatScrollRef = useRef(null);
+  const silenceTimerRef = useRef(null);
 
   // Quick Multilingual Test Prompts dynamically rendered according to selected language
   const getPresetQueries = (langCode) => {
@@ -113,7 +114,18 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
 
     // Update speech recognition dialect
     if (recognitionRef.current) {
+      const wasListening = isListening;
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {}
       recognitionRef.current.lang = LANGUAGE_CONFIG[newLangCode].speechRecognition;
+      if (wasListening) {
+        setTimeout(() => {
+          try {
+            recognitionRef.current.start();
+          } catch (e) {}
+        }, 150);
+      }
     }
 
     // Stop active speech if speaking
@@ -137,6 +149,7 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
       setAudioFeedbackMsg('');
       initSpeechRecognition();
     } else {
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       stopListening();
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         window.speechSynthesis.cancel();
@@ -145,6 +158,7 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
     }
 
     return () => {
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       stopListening();
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         window.speechSynthesis.cancel();
@@ -165,8 +179,12 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
     }
 
     try {
+      if (recognitionRef.current) {
+        try { recognitionRef.current.abort(); } catch (e) {}
+      }
+
       const recognition = new SpeechRecognition();
-      recognition.continuous = false;
+      recognition.continuous = true;
       recognition.interimResults = true;
       recognition.maxAlternatives = 1;
       recognition.lang = (LANGUAGE_CONFIG[selectedLanguage] || LANGUAGE_CONFIG.en).speechRecognition;
@@ -179,41 +197,63 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
       };
 
       recognition.onresult = (event) => {
-        let currentTranscript = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          currentTranscript += event.results[i][0].transcript;
+        let accumulatedFinal = '';
+        let interim = '';
+
+        for (let i = 0; i < event.results.length; i++) {
+          const item = event.results[i];
+          if (item.isFinal) {
+            accumulatedFinal += item[0].transcript + ' ';
+          } else {
+            interim += item[0].transcript;
+          }
         }
 
-        if (currentTranscript) {
-          setTranscript(currentTranscript);
-          // Detect incoming script for live feedback, but DO NOT override selected response language
-          const detected = detectLanguageFromTranscript(currentTranscript);
+        const fullSpoken = (accumulatedFinal + interim).trim();
+
+        if (fullSpoken) {
+          // Actively type speech into BOTH manual input and transcript!
+          setTranscript(fullSpoken);
+          setManualInput(fullSpoken);
+
+          const detected = detectLanguageFromTranscript(fullSpoken);
           setDetectedSpeechLang(detected);
-        }
 
-        // Final speech transcript delivered
-        if (event.results[0].isFinal) {
-          const finalQuery = currentTranscript.trim();
-          if (finalQuery) {
-            handleProcessQuery(finalQuery, selectedLanguage);
+          // Reset silence timer on every new speech token
+          if (silenceTimerRef.current) {
+            clearTimeout(silenceTimerRef.current);
+          }
+
+          // Auto-submit after 1.8 seconds of silence when a complete sentence is spoken
+          const hasFinal = Array.from(event.results).some(r => r.isFinal);
+          if (hasFinal && (accumulatedFinal.trim().length > 3 || fullSpoken.length > 5)) {
+            silenceTimerRef.current = setTimeout(() => {
+              const query = (accumulatedFinal || fullSpoken).trim();
+              if (query) {
+                stopListening();
+                handleProcessQuery(query, selectedLanguage);
+              }
+            }, 1800);
           }
         }
       };
 
       recognition.onerror = (event) => {
+        // 'no-speech' is non-fatal in continuous mode
+        if (event.error === 'no-speech') {
+          return;
+        }
+
         setIsListening(false);
         switch (event.error) {
-          case 'no-speech':
-            setSpeechError('No speech was detected. Please try speaking again.');
-            break;
           case 'not-allowed':
-            setSpeechError('Microphone access was denied. Please allow microphone permissions in your browser.');
+            setSpeechError('Microphone permission was denied. Please allow microphone access in your browser.');
             break;
           case 'audio-capture':
             setSpeechError('No audio capture device found.');
             break;
           case 'network':
-            setSpeechError('Speech recognition network error. Click quick questions below to test.');
+            setSpeechError('Speech recognition network error. You can type directly or click quick questions.');
             break;
           case 'language-not-supported':
             setSpeechError(`Speech recognition for ${currentConfig.name} is not supported on this device.`);
@@ -239,7 +279,12 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
    */
   const handleToggleMic = () => {
     if (isListening) {
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       stopListening();
+      const currentQuery = (manualInput || transcript || '').trim();
+      if (currentQuery) {
+        handleProcessQuery(currentQuery, selectedLanguage);
+      }
     } else {
       startListening();
     }
@@ -249,6 +294,7 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
     setSpeechError('');
     setTranscript('');
     setAudioFeedbackMsg('');
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
 
     if (recognitionRef.current) {
       try {
@@ -256,25 +302,35 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
         recognitionRef.current.start();
         setIsListening(true);
       } catch (e) {
-        // If already running, restart smoothly
-        try {
-          recognitionRef.current.stop();
-          setTimeout(() => {
+        initSpeechRecognition();
+        setTimeout(() => {
+          try {
             if (recognitionRef.current) {
-              recognitionRef.current.lang = (LANGUAGE_CONFIG[selectedLanguage] || LANGUAGE_CONFIG.en).speechRecognition;
               recognitionRef.current.start();
+              setIsListening(true);
             }
-          }, 150);
-        } catch (inner) {
-          console.warn('Recognition restart error:', inner);
-        }
+          } catch (inner) {
+            console.warn('Recognition start error:', inner);
+          }
+        }, 150);
       }
     } else {
       initSpeechRecognition();
+      setTimeout(() => {
+        try {
+          if (recognitionRef.current) {
+            recognitionRef.current.start();
+            setIsListening(true);
+          }
+        } catch (inner) {
+          console.warn('Recognition start error:', inner);
+        }
+      }, 150);
     }
   };
 
   const stopListening = () => {
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
@@ -397,6 +453,7 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
    */
   const handlePresetSelect = (preset) => {
     setSpeechError('');
+    setManualInput(preset.text);
     handleProcessQuery(preset.text, selectedLanguage);
   };
 
@@ -405,6 +462,7 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
    */
   const handleManualSubmit = (e) => {
     e.preventDefault();
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     if (!manualInput.trim() || isProcessing) return;
     handleProcessQuery(manualInput.trim(), selectedLanguage);
   };
@@ -422,10 +480,10 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
             </div>
             <div>
               <h3 className="text-sm font-bold text-[#0F2747] leading-none">
-                COAD-X Gemini Multilingual Voice Agent
+                COAD-X Gemini 3.8 Flash Multilingual Voice Agent
               </h3>
               <p className="text-[11px] text-slate-500 mt-0.5">
-                Speech Recognition & Live Forensic Intelligence ({currentConfig.name})
+                Speech-to-Text & Live Forensic Intelligence ({currentConfig.name})
               </p>
             </div>
           </div>
@@ -502,14 +560,14 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
           {/* Real-time Streaming Transcript */}
           {transcript && (
             <div className="flex gap-2.5 justify-end animate-fadeIn">
-              <div className="max-w-[85%] rounded-2xl p-3.5 text-xs leading-relaxed bg-[#E6F6FA]/80 border border-dashed border-[#0F8FB3] text-[#0F2747]">
+              <div className="max-w-[85%] rounded-2xl p-3.5 text-xs leading-relaxed bg-[#E6F6FA]/90 border border-dashed border-[#0F8FB3] text-[#0F2747] shadow-xs">
                 <div className="flex items-center justify-between gap-2 mb-1 text-[10px] text-[#0F8FB3]">
                   <span className="font-bold flex items-center gap-1">
-                    <Radio className="w-3 h-3 animate-pulse" /> Live Speech
+                    <Radio className="w-3 h-3 animate-pulse" /> Live Speech Typing
                   </span>
                   <span className="font-semibold">{detectedSpeechLang.nativeLabel}</span>
                 </div>
-                <p className="italic font-medium">{transcript}</p>
+                <p className="font-medium text-slate-800">{transcript}</p>
               </div>
               <div className="w-7 h-7 rounded-lg bg-[#0F8FB3] text-white flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
                 <User className="w-4 h-4" />
@@ -525,7 +583,7 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
               </div>
               <div className="bg-white border border-[#E2E8F0] p-3 rounded-2xl text-xs flex items-center gap-2 text-slate-600 shadow-xs">
                 <RefreshCw className="w-3.5 h-3.5 text-[#0F8FB3] animate-spin" />
-                <span>Formulating response in {currentConfig.nativeLabel}...</span>
+                <span>Formulating response in {currentConfig.nativeLabel} via Gemini 3.8 Flash...</span>
               </div>
             </div>
           )}
@@ -577,26 +635,53 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
           </div>
         </div>
 
-        {/* Manual Text Question Input */}
-        <form onSubmit={handleManualSubmit} className="px-5 py-2 bg-white border-t border-slate-100 flex items-center gap-2">
-          <input
-            type="text"
-            value={manualInput}
-            onChange={(e) => setManualInput(e.target.value)}
-            placeholder={
-              selectedLanguage === 'hi'
-                ? 'प्रश्न यहां टाइप करें (उदा. इस केस में कितने सबूत हैं?)...'
-                : selectedLanguage === 'kn'
-                ? 'ಇಲ್ಲಿ ಪ್ರಶ್ನೆಯನ್ನು ಟೈಪ್ ಮಾಡಿ (ಉದಾ. ಈ ಪ್ರಕರಣದಲ್ಲಿ ಎಷ್ಟು ಸಾಕ್ಷ್ಯಗಳಿವೆ?)...'
-                : 'Type a forensic question (e.g. What is the evidence count?)...'
-            }
-            disabled={isProcessing}
-            className="flex-1 px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-[#0F172A] placeholder-slate-400 focus:outline-none focus:border-[#0F8FB3] focus:bg-white transition-all font-medium"
-          />
+        {/* Manual Text Question Input with Live Typing and Embedded Mic Toggle */}
+        <form onSubmit={handleManualSubmit} className="px-5 py-2.5 bg-white border-t border-slate-100 flex items-center gap-2">
+          <div className="relative flex-1 flex items-center">
+            <input
+              type="text"
+              value={manualInput}
+              onChange={(e) => setManualInput(e.target.value)}
+              placeholder={
+                isListening
+                  ? (selectedLanguage === 'hi'
+                    ? 'बोलिए... आपकी आवाज़ यहां टाइप हो रही है'
+                    : selectedLanguage === 'kn'
+                    ? 'ಮಾತನಾಡಿ... ನಿಮ್ಮ ಧ್ವನಿ ಇಲ್ಲಿ ಟೈಪ್ ಆಗುತ್ತಿದೆ'
+                    : 'Listening... speaking will type here live')
+                  : (selectedLanguage === 'hi'
+                    ? 'प्रश्न यहां टाइप करें या माइक दबाकर बोलें...'
+                    : selectedLanguage === 'kn'
+                    ? 'ಇಲ್ಲಿ ಪ್ರಶ್ನೆಯನ್ನು ಟೈಪ್ ಮಾಡಿ ಅಥವಾ ಮೈಕ್ ಒತ್ತಿ ಮಾತನಾಡಿ...'
+                    : 'Speak into mic or type a forensic question...')
+              }
+              disabled={isProcessing}
+              className={`w-full pl-3.5 pr-10 py-2.5 bg-slate-50 border rounded-xl text-xs text-[#0F172A] placeholder-slate-400 focus:outline-none transition-all font-medium ${
+                isListening
+                  ? 'border-red-400 ring-2 ring-red-100 bg-red-50/20'
+                  : 'border-slate-200 focus:border-[#0F8FB3] focus:bg-white'
+              }`}
+            />
+            {/* Quick Mic toggle inside the input box */}
+            <button
+              type="button"
+              onClick={handleToggleMic}
+              disabled={isProcessing}
+              className={`absolute right-2 p-1.5 rounded-lg transition-colors ${
+                isListening
+                  ? 'text-red-500 bg-red-100 animate-pulse'
+                  : 'text-slate-400 hover:text-[#0F8FB3] hover:bg-slate-100'
+              }`}
+              title={isListening ? 'Stop listening & send' : 'Click to speak'}
+            >
+              {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+            </button>
+          </div>
+
           <button
             type="submit"
             disabled={!manualInput.trim() || isProcessing}
-            className="px-3.5 py-2 bg-[#0F2747] hover:bg-[#163866] text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-xs disabled:opacity-40"
+            className="px-4 py-2.5 bg-[#0F2747] hover:bg-[#163866] text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-xs disabled:opacity-40 shrink-0"
           >
             <span>Send</span>
             <ArrowRight className="w-3.5 h-3.5" />
@@ -624,18 +709,18 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
               <div className="flex items-center gap-2">
                 <span className="text-xs font-bold text-[#0F2747]">
                   {isListening
-                    ? 'Listening...'
+                    ? 'Listening & Typing Speech...'
                     : isProcessing
-                    ? 'Processing with Gemini...'
+                    ? 'Processing with Gemini 3.8 Flash...'
                     : isSpeaking
                     ? 'Speaking Response...'
                     : 'Ready'}
                 </span>
                 {isListening && (
                   <span className="flex gap-0.5 items-end h-3">
-                    <span className="w-0.5 h-2 bg-[#0F8FB3] animate-pulse"></span>
-                    <span className="w-0.5 h-3 bg-[#0F8FB3] animate-bounce"></span>
-                    <span className="w-0.5 h-1.5 bg-[#0F8FB3] animate-pulse"></span>
+                    <span className="w-0.5 h-2 bg-red-500 animate-pulse"></span>
+                    <span className="w-0.5 h-3 bg-red-500 animate-bounce"></span>
+                    <span className="w-0.5 h-1.5 bg-red-500 animate-pulse"></span>
                   </span>
                 )}
                 {isSpeaking && (
@@ -646,7 +731,7 @@ export default function VoiceAgentModal({ isOpen, onClose, setCurrentPage }) {
                 )}
               </div>
               <p className="text-[11px] text-slate-500">
-                Speaks in: <strong className="text-[#0F8FB3]">{currentConfig.nativeLabel}</strong> (auto-detects each turn)
+                Powered by <strong className="text-[#0F8FB3]">Gemini 3.8 Flash</strong> ({currentConfig.nativeLabel})
               </p>
             </div>
           </div>

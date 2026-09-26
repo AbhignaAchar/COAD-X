@@ -16,6 +16,7 @@ const SIGNATURES = {
   ZIP_EMPTY: [0x50, 0x4B, 0x05, 0x06],
   ZIP_SPANNED: [0x50, 0x4B, 0x07, 0x08],
   OLE2_DOC: [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1], // Legacy MS Compound Binary (DOC, XLS)
+  EWF_E01: [0x45, 0x56, 0x46, 0x09], // EVF\x09 (EnCase/EWF Forensic Image)
 };
 
 /**
@@ -205,6 +206,13 @@ export function detectFileType(file, bytes, textPreview = '') {
     mimeType = 'application/msword';
     magicSignatureMatch = true;
     description = 'Legacy Microsoft Compound Binary Document (Magic: D0 CF 11 E0)';
+  } else if (matchesSignature(uint8, SIGNATURES.EWF_E01) || /^e\d{2}$/i.test(ext)) {
+    detectedCategory = 'DISK_IMAGE';
+    detectedFormat = 'E01';
+    reconstructionMode = 'EWF_FORENSIC_RECONSTRUCTION';
+    mimeType = 'application/octet-stream';
+    magicSignatureMatch = true;
+    description = 'EnCase / EWF Forensic Evidence Image (Magic: EVF)';
   } else if (isPlainTextBytes(uint8) || ['txt', 'csv', 'log', 'json', 'xml', 'raw', 'dd', 'slice', 'dat'].includes(ext)) {
     detectedCategory = 'TEXT';
     const trimmedText = text.trim();

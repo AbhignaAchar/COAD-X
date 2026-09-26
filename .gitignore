@@ -9,10 +9,18 @@ build/
 
 # Environment configuration
 .env
+.env.*
+src/.env
+**/.env
+**/.env.*
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
+
+# Scratch / Local test scripts
+test_e01.js
+test_black_img.cjs
 
 # Operating System & IDE
 .DS_Store

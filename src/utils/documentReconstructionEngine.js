@@ -126,7 +126,7 @@ export async function inpaintDamagedTextWithAI(rawText, detectedType = 'TXT') {
         return {
           reconstructedText: clean,
           source: data.source || 'gemini',
-          model: data.model || 'gemini-3-flash-preview',
+          model: data.model || 'gemini-3.8-flash',
           stats: reconstructUnallocatedDiskSlice(rawText).stats
         };
       }
@@ -550,60 +550,95 @@ export function validateReconstructedText(reconstructedText, format = 'TXT', fra
  */
 export function analyzePdfStructure(bytes, rawText) {
   const text = rawText || (bytes ? new TextDecoder('latin1').decode(bytes) : '');
+  const totalBytes = bytes ? bytes.length : text.length;
+
   const hasPdfHeader = text.includes('%PDF-');
   const headerVersionMatch = text.match(/%PDF-(\d+\.\d+)/);
   const headerVersion = headerVersionMatch ? `%PDF-${headerVersionMatch[1]}` : (hasPdfHeader ? '%PDF-1.4' : 'MISSING');
 
+  // Detect Linearization and Declared Length
+  const linMatch = text.match(/\/Linearized\s*[\d\.]+.*?\/L\s+(\d+)/);
+  let declaredLength = 0;
+  if (linMatch) {
+    declaredLength = parseInt(linMatch[1], 10);
+  }
+
+  let isTruncated = false;
+  let missingBytes = 0;
+  if (declaredLength > 0 && declaredLength > totalBytes + 128) {
+    isTruncated = true;
+    missingBytes = declaredLength - totalBytes;
+  }
+
   // Search for PDF objects (X Y obj ... endobj)
-  const objRegex = /(\d+)\s+(\d+)\s+obj([\s\S]*?)endobj/g;
+  const objRegex = /(\d+)\s+(\d+)\s+obj([\s\S]*?)(?:endobj|$)/g;
   const objects = [];
   let m;
+
+  let truncatedObjectsCount = 0;
+  let truncatedStreamsCount = 0;
+  let validStreamsCount = 0;
+  let fullyRecoveredObjects = 0;
 
   while ((m = objRegex.exec(text)) !== null) {
     const objId = parseInt(m[1], 10);
     const gen = parseInt(m[2], 10);
     const body = m[3];
-    const isStream = body.includes('stream') && body.includes('endstream');
+    const isStream = body.includes('stream');
+    const hasEndstream = body.includes('endstream');
+    const hasEndobj = text.substring(m.index + m[0].length - 6, m.index + m[0].length) === 'endobj';
+    
     const typeMatch = body.match(/\/Type\s*\/([A-Za-z0-9]+)/);
     const objType = typeMatch ? typeMatch[1] : (isStream ? 'Stream' : 'Dictionary');
+
+    const lengthMatch = body.match(/\/Length\s+(\d+)/);
+    let expectedStreamLength = 0;
+    if (lengthMatch) {
+      expectedStreamLength = parseInt(lengthMatch[1], 10);
+    }
+
+    let isTruncatedObj = !hasEndobj;
+    let isTruncatedStream = false;
+
+    if (isStream) {
+      if (!hasEndstream) {
+        isTruncatedStream = true;
+        isTruncatedObj = true;
+      } else if (expectedStreamLength > 0) {
+        const streamStart = body.indexOf('stream');
+        const streamEnd = body.indexOf('endstream');
+        if (streamEnd - streamStart - 6 < expectedStreamLength) {
+           isTruncatedStream = true;
+           isTruncatedObj = true;
+        }
+      }
+    }
+
+    if (isTruncatedObj) truncatedObjectsCount++;
+    else fullyRecoveredObjects++;
+
+    if (isStream) {
+      if (isTruncatedStream) truncatedStreamsCount++;
+      else validStreamsCount++;
+    }
 
     objects.push({
       id: objId,
       gen,
       type: objType,
       hasStream: isStream,
+      isTruncated: isTruncatedObj,
+      isTruncatedStream,
+      content: body.trim(),
       bodyPreview: body.trim().slice(0, 80),
       offset: m.index,
-      preview: `Object ${objId} (${objType})`
+      preview: `Object ${objId} (${objType})${isTruncatedObj ? ' [TRUNCATED]' : ''}`
     });
-  }
-
-  // Fallback for corrupted PDFs where endobj tags are missing or stream objects are broken
-  if (objects.length === 0) {
-    const looseObjRegex = /(\d+)\s+(\d+)\s+obj([\s\S]*?)(?=\d+\s+\d+\s+obj|xref|trailer|%%EOF|$)/g;
-    while ((m = looseObjRegex.exec(text)) !== null) {
-      const objId = parseInt(m[1], 10);
-      const gen = parseInt(m[2], 10);
-      const body = m[3];
-      const isStream = body.includes('stream');
-      const typeMatch = body.match(/\/Type\s*\/([A-Za-z0-9]+)/);
-      const objType = typeMatch ? typeMatch[1] : (isStream ? 'Stream' : 'Corrupted Object');
-
-      objects.push({
-        id: objId,
-        gen,
-        type: objType,
-        hasStream: isStream,
-        bodyPreview: body.trim().slice(0, 80),
-        offset: m.index,
-        preview: `Salvaged Object ${objId} (${objType})`
-      });
-    }
   }
 
   // If still no objects found, slice binary byte stream into 512-byte sector fragments for structural carving
   if (objects.length === 0) {
-    const totalBytes = bytes ? bytes.length : text.length;
+    isTruncated = true; // No valid structure means effectively truncated/corrupt
     const chunkSize = 512;
     const chunkCount = Math.max(1, Math.ceil(totalBytes / chunkSize));
 
@@ -615,6 +650,7 @@ export function analyzePdfStructure(bytes, rawText) {
         gen: 0,
         type: c === 0 ? 'Header Sector' : 'Corrupted Binary Stream Block',
         hasStream: true,
+        isTruncated: true,
         bodyPreview: `Binary Sector ${c + 1} (${len} Bytes at Offset 0x${offset.toString(16).toUpperCase()})`,
         offset,
         preview: `Sector ${c + 1} (${c === 0 ? 'Header' : 'Payload Block'})`
@@ -631,21 +667,41 @@ export function analyzePdfStructure(bytes, rawText) {
   const hasXref = text.includes('xref') || text.includes('/Type /XRef');
   const hasTrailer = text.includes('trailer') || text.includes('/Root');
   const hasEof = text.includes('%%EOF');
-  const isCorrupted = !hasPdfHeader || !hasEof || !hasXref;
+  
+  // Valid startxref offset check
+  let isXrefValid = hasXref;
+  const startxrefMatch = text.match(/startxref\s+(\d+)/);
+  if (startxrefMatch) {
+    const xrefOffset = parseInt(startxrefMatch[1], 10);
+    if (xrefOffset > totalBytes) {
+      isXrefValid = false; // xref points outside available bytes
+      isTruncated = true;
+    }
+  }
+
+  const isCorrupted = !hasPdfHeader || !hasEof || !isXrefValid || isTruncated || truncatedObjectsCount > 0;
 
   return {
     header: headerVersion,
     hasHeader: hasPdfHeader,
     hasPdfHeader: hasPdfHeader,
     isCorruptedPdf: isCorrupted,
+    isTruncated,
+    missingBytes,
+    declaredLength,
+    totalBytes,
     objectsCount: objects.length,
+    fullyRecoveredObjects,
+    truncatedObjectsCount,
+    validStreamsCount,
+    truncatedStreamsCount,
     objects,
     hasCatalog,
     hasPages,
     hasPage,
     streamCount,
     hasStreams,
-    hasXref,
+    hasXref: isXrefValid,
     hasTrailer,
     hasEof,
     rawBytes: bytes,
@@ -710,25 +766,37 @@ export function reconstructPdfBinary(arg1, arg2, arg3) {
 
   pdfString += `trailer\n<< /Size ${bodyObjects.length + 1} /Root 1 0 R >>\nstartxref\n${startXref}\n%%EOF\n`;
 
-  const reconstructedBytes = new TextEncoder().encode(pdfString);
+  const reconstructedBytes = new Uint8Array(pdfString.length);
+  for (let i = 0; i < pdfString.length; i++) {
+    reconstructedBytes[i] = pdfString.charCodeAt(i) & 0xFF;
+  }
 
-  // Status check
+  // Strict validation logic
+  const isValidPdf = !pdfAnalysis.isCorruptedPdf && 
+                     !pdfAnalysis.isTruncated && 
+                     pdfAnalysis.hasCatalog && 
+                     pdfAnalysis.hasPages;
+  
   let status = 'PDF RECONSTRUCTED';
   let confidence = 96;
 
-  if (pdfAnalysis.hasPdfHeader && pdfAnalysis.hasEof && pdfAnalysis.objects?.length >= 2) {
+  if (isValidPdf) {
     status = 'PDF RECONSTRUCTED';
     confidence = 98;
-  } else if (pdfAnalysis.hasPdfHeader || pdfAnalysis.objects?.length > 0) {
-    status = 'PDF PARTIALLY RECONSTRUCTED';
-    confidence = 75;
+  } else if (pdfAnalysis.isTruncated) {
+    status = 'PARTIAL / FAILED';
+    confidence = 30;
+  } else if (pdfAnalysis.objects?.length > 0) {
+    status = 'PARTIAL / FAILED';
+    confidence = 45;
   } else {
-    status = 'PDF RECONSTRUCTION FAILED';
+    status = 'RECONSTRUCTION FAILED';
     confidence = 20;
   }
 
   let downloadUrl = '';
-  if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+  // Only create openable PDF URL if it is strictly valid
+  if (isValidPdf && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
     try {
       const blob = new Blob([reconstructedBytes], { type: 'application/pdf' });
       downloadUrl = URL.createObjectURL(blob);
@@ -741,13 +809,14 @@ export function reconstructPdfBinary(arg1, arg2, arg3) {
     pdfUrl: downloadUrl,
     downloadUrl: downloadUrl,
     reconstructedDataUrl: downloadUrl,
-    bytes: reconstructedBytes,
+    isValidPdf,
+    bytes: isValidPdf ? reconstructedBytes : (bytes || new Uint8Array(0)),
     pdfMetrics: {
       ...pdfAnalysis,
       headerStatus: pdfAnalysis.hasHeader ? 'VERIFIED' : 'SYNTHESIZED (%PDF-1.4)',
-      trailerStatus: 'VERIFIED & REBUILT',
-      eofStatus: '%%EOF VERIFIED',
-      objectsRecovered: bodyObjects.length
+      trailerStatus: isValidPdf ? 'VERIFIED & REBUILT' : 'INVALID / MISSING',
+      eofStatus: pdfAnalysis.hasEof ? '%%EOF VERIFIED' : 'MISSING',
+      objectsRecovered: pdfAnalysis.fullyRecoveredObjects !== undefined ? pdfAnalysis.fullyRecoveredObjects : bodyObjects.length
     }
   };
 }

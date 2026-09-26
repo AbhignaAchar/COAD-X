@@ -123,7 +123,7 @@ function copilotApiPlugin() {
           res.end(JSON.stringify({
             configured: Boolean(apiKey),
             provider: 'gemini',
-            model: 'gemini-3-flash-preview',
+            model: 'gemini-3.8-flash',
             status: 'operational',
             supportedLanguages: ['English', 'हिन्दी', 'ಕನ್ನಡ']
           }));
@@ -175,7 +175,14 @@ ${message}
 
 Remember: You MUST answer entirely in ${langCfg.name}.`;
 
-              const modelsToTry = ['gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview'];
+              const modelsToTry = [
+                'gemini-3.8-flash',
+                'gemini-3.1-flash-lite',
+                'gemini-flash-latest',
+                'gemini-3.1-flash-lite-preview',
+                'gemini-3.6-flash',
+                'gemini-3-flash-preview'
+              ];
 
               for (const model of modelsToTry) {
                 try {
@@ -208,7 +215,9 @@ Remember: You MUST answer entirely in ${langCfg.name}.`;
                     );
                     if (!geminiRes.ok) return null;
                     const geminiData = await geminiRes.json();
-                    return geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || null;
+                    const parts = geminiData?.candidates?.[0]?.content?.parts || [];
+                    const textPart = parts.find(p => p.text && !p.thought) || parts[parts.length - 1];
+                    return textPart?.text || null;
                   };
 
                   let text = await callGemini(promptContent);

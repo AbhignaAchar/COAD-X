@@ -193,13 +193,18 @@ export function calculateEntropyUniformity(blocks = [], targetIndex = 0, rawByte
   }
 
   // Single block without enough context
-  const singleEntropy = blocks && blocks[targetIndex] ? blocks[targetIndex].entropy : (rawBytes ? calculateEntropy(rawBytes) : 0);
+  const singleEntropy = (blocks && blocks[targetIndex] && blocks[targetIndex].entropy !== undefined) 
+    ? blocks[targetIndex].entropy 
+    : (rawBytes ? calculateEntropy(rawBytes) : 0);
+    
+  const validEntropy = typeof singleEntropy === 'number' ? singleEntropy : 0;
+
   return {
-    suspicious: singleEntropy > 7.85,
-    meanEntropy: parseFloat(singleEntropy.toFixed(2)),
+    suspicious: validEntropy > 7.85,
+    meanEntropy: parseFloat(validEntropy.toFixed(2)),
     stddev: 0.2,
     windowOffsetRange: [0, 1024],
-    details: `Entropy: ${singleEntropy.toFixed(2)} (single sector estimation)`
+    details: `Entropy: ${validEntropy.toFixed(2)} (single sector estimation)`
   };
 }
 

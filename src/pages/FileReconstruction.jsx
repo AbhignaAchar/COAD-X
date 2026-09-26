@@ -55,6 +55,8 @@ import {
   createSampleDocxEvidence
 } from '../utils/documentReconstructionEngine';
 import { calculateSHA256 } from '../utils/forensicEngine';
+import { processE01Image } from '../utils/e01ReconstructionEngine';
+import { processZipArchive } from '../utils/zipReconstructionEngine';
 
 // Modal component allowing user to load sample evidence in multiple formats
 function SampleEvidenceModal({ isOpen, onClose, onSelectSample }) {
@@ -794,6 +796,36 @@ export default function FileReconstruction() {
         return;
       }
 
+      if (detection.fileType === 'e01' || detection.fileType === 'zip') {
+        const isE01 = detection.fileType === 'e01';
+        const sha = await calculateSHA256(new Uint8Array(arrayBuffer.slice(0, 4096)));
+        const evidenceData = {
+          id: `EVD-${isE01 ? 'E01' : 'ZIP'}-${Date.now().toString(36).toUpperCase()}`,
+          fileName: file.name,
+          fileSize: file.size,
+          fileSizeFormatted: `${(file.size / 1024 / 1024).toFixed(2)} MB`,
+          category: 'DISK_IMAGE',
+          fileType: isE01 ? 'e01' : 'zip',
+          detectedType: isE01 ? 'EWF Forensic Image' : 'ZIP Archive',
+          mimeType: file.type || 'application/octet-stream',
+          reconstructionMode: isE01 ? 'EWF_FORENSIC_RECONSTRUCTION' : 'ARCHIVE STRUCTURAL RECONSTRUCTION',
+          isMismatch: detection.isMismatch,
+          mismatchDetails: detection.mismatchDetails,
+          hexSignature: detection.hexSignature,
+          fragments: [{ id: 'CHUNK-TABLE-01', label: 'EWF Chunk Table / Central Directory' }],
+          fragmentsDetected: 1,
+          inputSha256: sha,
+          rawBytes: new Uint8Array(arrayBuffer)
+        };
+
+        setUploadedEvidence(evidenceData);
+        registerImageEvidence(evidenceData, file);
+        setCurrentStepInfo(null);
+        setIsProcessing(false);
+        showToast(`${isE01 ? 'E01 Forensic Image' : 'ZIP Archive'} loaded. Ready for reconstruction.`, 'success');
+        return;
+      }
+
       // Unsupported / Unknown format
       const sha = await calculateSHA256(new Uint8Array(arrayBuffer.slice(0, 1024)));
       const evidenceData = {
@@ -974,18 +1006,20 @@ export default function FileReconstruction() {
           fileType: 'pdf',
           status: recon.status,
           pdfAnalysis: pdfAnalysis,
+          pdfMetrics: recon.pdfMetrics,
           reconstructedPdfUrl: recon.pdfUrl,
           downloadUrl: recon.pdfUrl,
+          isValidPdf: recon.isValidPdf,
           downloadName: `COAD-X_Reconstructed_${cleanBase}.pdf`,
           reconstructedBytes: recon.bytes,
           fragmentsDetected: uploadedEvidence.fragmentsDetected,
-          fragmentsUsed: recon.status === 'PDF RECONSTRUCTION FAILED' ? 0 : uploadedEvidence.fragmentsDetected,
-          fragmentsUnresolved: recon.status === 'PDF RECONSTRUCTION FAILED' ? uploadedEvidence.fragmentsDetected : 0,
-          uncertainRegions: recon.status === 'PDF RECONSTRUCTED' ? 0 : (recon.status === 'PDF PARTIALLY RECONSTRUCTED' ? 1 : 3),
+          fragmentsUsed: recon.status.includes('FAILED') ? 0 : uploadedEvidence.fragmentsDetected,
+          fragmentsUnresolved: recon.status.includes('FAILED') ? uploadedEvidence.fragmentsDetected : 0,
+          uncertainRegions: recon.isValidPdf ? 0 : (recon.pdfMetrics?.truncatedObjectsCount > 0 ? recon.pdfMetrics.truncatedObjectsCount : 1),
           forensicMetrics: {
-            directlyRecoveredPercent: recon.status === 'PDF RECONSTRUCTED' ? 96 : (recon.status === 'PDF PARTIALLY RECONSTRUCTED' ? 74 : 15),
-            inferredPercent: recon.status === 'PDF RECONSTRUCTED' ? 4 : 20,
-            unknownPercent: recon.status === 'PDF RECONSTRUCTED' ? 0 : (recon.status === 'PDF PARTIALLY RECONSTRUCTED' ? 6 : 85)
+            directlyRecoveredPercent: recon.isValidPdf ? 96 : (recon.status.includes('PARTIAL') ? 30 : 0),
+            inferredPercent: recon.isValidPdf ? 4 : 5,
+            unknownPercent: recon.isValidPdf ? 0 : (recon.status.includes('PARTIAL') ? 65 : 100)
           }
         };
 
@@ -1062,6 +1096,162 @@ export default function FileReconstruction() {
         setReconstructionResult(result);
         setIsProcessing(false);
         showToast('Legacy DOC requires binary-format analysis.', 'warning');
+        return;
+      }
+      // ROUTER 6: E01/EWF FORENSIC EVIDENCE IMAGE
+      if (uploadedEvidence.fileType === 'e01') {
+        setCurrentStepInfo({ step: 1, title: 'EWF FORENSIC IMAGE DECODING', details: 'Parsing EVF headers, reading chunk table, and initializing decompression stream...' });
+        await new Promise(r => setTimeout(r, 600));
+        
+        setCurrentStepInfo({ step: 2, title: 'LOGICAL DISK & FILESYSTEM CARVING', details: 'Reconstructing logical disk space and scanning for MBR/Partition structures...' });
+        await new Promise(r => setTimeout(r, 600));
+
+        let e01Result;
+        try {
+          // ensure we pass an ArrayBuffer
+          const buffer = uploadedEvidence.rawBytes instanceof Uint8Array 
+            ? uploadedEvidence.rawBytes.buffer.slice(uploadedEvidence.rawBytes.byteOffset, uploadedEvidence.rawBytes.byteOffset + uploadedEvidence.rawBytes.byteLength)
+            : uploadedEvidence.rawBytes;
+          e01Result = await processE01Image(buffer);
+        } catch (e) {
+           throw new Error('E01 parsing failed: ' + e.message);
+        }
+
+        setCurrentStepInfo({ step: 3, title: 'FILE EXTRACTION & VERIFICATION', details: `Parsing ${e01Result.filesystem} filesystem and verifying file signatures...` });
+        await new Promise(r => setTimeout(r, 600));
+
+        const result = {
+          category: 'DISK_IMAGE',
+          fileType: 'e01',
+          status: e01Result.status,
+          evidenceFormat: e01Result.evidenceFormat,
+          logicalSize: e01Result.logicalSize,
+          partitions: e01Result.partitions,
+          filesystem: e01Result.filesystem,
+          directories: e01Result.directories,
+          filesRecovered: e01Result.filesRecovered,
+          jpegFiles: e01Result.jpegFiles,
+          integrity: e01Result.integrity,
+          recoveredFiles: e01Result.files,
+          chunks: e01Result.chunks,
+          rawImageBuffer: e01Result.rawImageBuffer,
+          
+          fragmentsDetected: e01Result.chunks,
+          fragmentsUsed: e01Result.chunks,
+          fragmentsUnresolved: 0,
+          uncertainRegions: 0,
+          forensicMetrics: {
+            directlyRecoveredPercent: 100,
+            inferredPercent: 0,
+            unknownPercent: 0
+          }
+        };
+
+        setReconstructionResult(result);
+        setCurrentStepInfo(null);
+        setIsProcessing(false);
+        showToast(`E01 Reconstruction: ${result.status}.`, 'success');
+        return;
+      }
+
+      // ROUTER 7: ZIP ARCHIVE
+      if (uploadedEvidence.fileType === 'zip') {
+        setCurrentStepInfo({ step: 1, title: 'ZIP DECOMPRESSION ENGINE', details: 'Scanning central directory and decoding local file headers...' });
+        await new Promise(r => setTimeout(r, 600));
+
+        let zipResult;
+        try {
+          const buffer = uploadedEvidence.rawBytes instanceof Uint8Array 
+            ? uploadedEvidence.rawBytes.buffer.slice(uploadedEvidence.rawBytes.byteOffset, uploadedEvidence.rawBytes.byteOffset + uploadedEvidence.rawBytes.byteLength)
+            : uploadedEvidence.rawBytes;
+          zipResult = await processZipArchive(buffer);
+        } catch (e) {
+           throw new Error('ZIP parsing failed: ' + e.message);
+        }
+
+        setCurrentStepInfo({ step: 2, title: 'PAYLOAD EXTRACTION & VERIFICATION', details: 'Decompressing file streams and validating integrity...' });
+        await new Promise(r => setTimeout(r, 600));
+
+        // Auto-route to E01 if the zip contains an E01 image
+        const e01File = zipResult.files.find(f => f.name.toLowerCase().endsWith('.e01'));
+        if (e01File && e01File.status === 'RECOVERED') {
+           setCurrentStepInfo({ step: 3, title: 'NESTED E01 DETECTED', details: 'Auto-routing unpacked EWF image to Disk Reconstruction Engine...' });
+           await new Promise(r => setTimeout(r, 600));
+           
+           let e01Result;
+           try {
+             const buf = e01File.buffer;
+             e01Result = await processE01Image(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+             
+             // Wrap E01 result in the ZIP UI output
+             const result = {
+                category: 'DISK_IMAGE',
+                fileType: 'e01',
+                status: e01Result.status,
+                evidenceFormat: 'ZIP Archive > ' + e01Result.evidenceFormat,
+                logicalSize: e01Result.logicalSize,
+                partitions: e01Result.partitions,
+                filesystem: e01Result.filesystem,
+                directories: e01Result.directories,
+                filesRecovered: e01Result.filesRecovered,
+                jpegFiles: e01Result.jpegFiles,
+                integrity: e01Result.integrity,
+                recoveredFiles: e01Result.files,
+                chunks: e01Result.chunks,
+                rawImageBuffer: e01Result.rawImageBuffer,
+                
+                fragmentsDetected: e01Result.chunks,
+                fragmentsUsed: e01Result.chunks,
+                fragmentsUnresolved: 0,
+                uncertainRegions: 0,
+                forensicMetrics: {
+                  directlyRecoveredPercent: 100,
+                  inferredPercent: 0,
+                  unknownPercent: 0
+                }
+              };
+
+              setReconstructionResult(result);
+              setCurrentStepInfo(null);
+              setIsProcessing(false);
+              showToast(`Nested E01 Reconstruction: ${result.status}.`, 'success');
+              return;
+           } catch (e) {
+             console.warn('Nested E01 failed, falling back to ZIP view', e);
+           }
+        }
+
+        const result = {
+          category: 'DISK_IMAGE', // Repurpose E01 UI for ZIP
+          fileType: 'zip',
+          status: zipResult.status,
+          evidenceFormat: zipResult.evidenceFormat,
+          logicalSize: zipResult.logicalSize,
+          partitions: 0,
+          filesystem: 'ZIP Container',
+          directories: 0,
+          filesRecovered: zipResult.filesRecovered,
+          jpegFiles: zipResult.files.filter(f => f.type === 'JPEG' || f.type === 'JPG').length,
+          integrity: zipResult.integrity,
+          recoveredFiles: zipResult.files,
+          chunks: zipResult.filesRecovered,
+          rawImageBuffer: new Uint8Array(0),
+          
+          fragmentsDetected: zipResult.filesRecovered,
+          fragmentsUsed: zipResult.filesRecovered,
+          fragmentsUnresolved: 0,
+          uncertainRegions: 0,
+          forensicMetrics: {
+            directlyRecoveredPercent: 100,
+            inferredPercent: 0,
+            unknownPercent: 0
+          }
+        };
+
+        setReconstructionResult(result);
+        setCurrentStepInfo(null);
+        setIsProcessing(false);
+        showToast(`ZIP Reconstruction: ${result.status}.`, 'success');
         return;
       }
 
@@ -1274,7 +1464,7 @@ export default function FileReconstruction() {
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/jpeg,image/jpg,image/png,image/webp,text/plain,text/csv,application/json,application/xml,text/xml,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword,.jpg,.jpeg,.png,.webp,.txt,.csv,.log,.json,.xml,.pdf,.doc,.docx"
+                accept="image/jpeg,image/jpg,image/png,image/webp,text/plain,text/csv,application/json,application/xml,text/xml,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword,application/zip,application/octet-stream,.jpg,.jpeg,.png,.webp,.txt,.csv,.log,.json,.xml,.pdf,.doc,.docx,.zip,.e01"
                 onChange={(e) => {
                   if (e.target.files && e.target.files[0]) {
                     const file = e.target.files[0];
@@ -2026,39 +2216,46 @@ export default function FileReconstruction() {
                                 />
                               ) : (
                                 <div className="text-center p-4 text-slate-500 space-y-2">
-                                  <File className="w-10 h-10 mx-auto text-rose-500" />
-                                  <p className="text-xs font-mono font-semibold text-[#0F172A]">PDF Binary Synthesized</p>
-                                  <p className="text-[11px] text-slate-500">Valid %PDF-1.4 stream compiled with catalog & cross-references.</p>
+                                  <AlertTriangle className="w-10 h-10 mx-auto text-amber-500" />
+                                  <p className="text-xs font-mono font-semibold text-[#0F172A]">NO VALID PDF GENERATED</p>
+                                  <p className="text-[11px] text-slate-500">Input PDF is truncated and insufficient to reconstruct a complete valid PDF.</p>
                                 </div>
                               )}
-                              <div className="absolute top-2.5 right-2.5 px-2.5 py-0.5 rounded bg-rose-50 border border-rose-200 text-[10px] font-mono text-rose-700 flex items-center gap-1 shadow-sm font-semibold">
-                                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                                PDF STREAM VALIDATED
-                              </div>
+                              {reconstructionResult.isValidPdf ? (
+                                <div className="absolute top-2.5 right-2.5 px-2.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-[10px] font-mono text-emerald-700 flex items-center gap-1 shadow-sm font-semibold">
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                  PDF STREAM VALIDATED
+                                </div>
+                              ) : (
+                                <div className="absolute top-2.5 right-2.5 px-2.5 py-0.5 rounded bg-rose-50 border border-rose-200 text-[10px] font-mono text-rose-700 flex items-center gap-1 shadow-sm font-semibold">
+                                  <AlertTriangle className="w-3 h-3 text-rose-600" />
+                                  PDF INVALID / INCOMPLETE
+                                </div>
+                              )}
                             </div>
 
                             {/* PDF Structural Checklist */}
                             <div className="bg-white p-3 rounded-lg border border-slate-200 space-y-1.5 font-mono text-[11px] shadow-xs">
                               <div className="text-slate-600 font-bold border-b border-slate-200 pb-1 flex items-center justify-between">
                                 <span>PDF SPECIFICATION COMPLIANCE</span>
-                                <span className="text-rose-700 font-semibold">{reconstructionResult.status}</span>
+                                <span className={reconstructionResult.isValidPdf ? "text-emerald-700 font-semibold" : "text-rose-700 font-semibold"}>{reconstructionResult.status}</span>
                               </div>
                               <div className="grid grid-cols-2 gap-2 pt-1 text-slate-600">
                                 <div className="flex items-center justify-between">
                                   <span className="text-slate-500">%PDF Header:</span>
-                                  <span className="text-emerald-700 font-bold">VALID (%PDF-1.4)</span>
+                                  <span className={reconstructionResult.isValidPdf ? "text-emerald-700 font-bold" : "text-[#0F172A] font-bold"}>{reconstructionResult.pdfMetrics?.headerStatus || 'MISSING'}</span>
                                 </div>
                                 <div className="flex items-center justify-between">
-                                  <span className="text-slate-500">Objects Recovered:</span>
-                                  <span className="text-[#0F8FB3] font-bold">{reconstructionResult.pdfAnalysis?.objects?.length || 0} objects</span>
+                                  <span className="text-slate-500">Objects Fully Recovered:</span>
+                                  <span className="text-[#0F8FB3] font-bold">{reconstructionResult.pdfMetrics?.objectsRecovered || 0} objects</span>
                                 </div>
                                 <div className="flex items-center justify-between">
-                                  <span className="text-slate-500">Streams Recovered:</span>
-                                  <span className="text-[#0F172A] font-bold">{reconstructionResult.pdfAnalysis?.hasStreams ? 'VERIFIED' : 'NONE'}</span>
+                                  <span className="text-slate-500">Truncated Objects:</span>
+                                  <span className={reconstructionResult.pdfMetrics?.truncatedObjectsCount > 0 ? "text-amber-700 font-bold" : "text-[#0F172A] font-bold"}>{reconstructionResult.pdfMetrics?.truncatedObjectsCount || 0} objects</span>
                                 </div>
                                 <div className="flex items-center justify-between">
                                   <span className="text-slate-500">Trailer & %%EOF:</span>
-                                  <span className="text-emerald-700 font-bold">VALID (%%EOF INTACT)</span>
+                                  <span className={reconstructionResult.isValidPdf ? "text-emerald-700 font-bold" : "text-amber-700 font-bold"}>{reconstructionResult.pdfMetrics?.trailerStatus || 'MISSING'}</span>
                                 </div>
                               </div>
                             </div>
@@ -2131,6 +2328,69 @@ export default function FileReconstruction() {
                               <p className="text-[11px] text-slate-500 max-w-sm mx-auto">
                                 COAD-X does not falsely report successful reconstruction for proprietary binary OLE2 Compound File containers.
                               </p>
+                            </div>
+                          </div>
+                        ) :
+                        /* FORMAT 6/7: E01 & ZIP FORENSIC IMAGE */
+                        (uploadedEvidence?.fileType === 'e01' || uploadedEvidence?.fileType === 'zip') ? (
+                          <div className="w-full p-4 flex flex-col space-y-3">
+                            <div className="bg-[#F8FAFC] text-slate-800 p-5 rounded-lg border border-slate-200 shadow-sm space-y-2 font-mono text-xs">
+                               <div className="text-center border-b border-slate-200 pb-2 mb-3">
+                                 <h4 className="font-bold text-sm tracking-wide text-[#0F2747]">
+                                   COAD-X {uploadedEvidence.fileType === 'zip' ? 'ZIP ARCHIVE' : 'FORENSIC IMAGE'} RECONSTRUCTION
+                                 </h4>
+                                 <span className="text-[10px] text-slate-500 font-mono">
+                                   STATUS: {reconstructionResult.status}
+                                 </span>
+                               </div>
+                               <div className="grid grid-cols-2 gap-y-2">
+                                  <div className="font-bold">EVIDENCE FORMAT:</div><div>{reconstructionResult.evidenceFormat}</div>
+                                  <div className="font-bold">LOGICAL DISK:</div><div>{(reconstructionResult.logicalSize / 1024 / 1024).toFixed(1)} MB</div>
+                                  <div className="font-bold">CHUNKS:</div><div>{reconstructionResult.chunks}</div>
+                                  <div className="font-bold">PARTITIONS:</div><div>{reconstructionResult.partitions}</div>
+                                  <div className="font-bold">FILESYSTEM:</div><div>{reconstructionResult.filesystem}</div>
+                                  <div className="font-bold">DIRECTORIES:</div><div>{reconstructionResult.directories}+</div>
+                                  <div className="font-bold">FILES RECOVERED:</div><div>{reconstructionResult.filesRecovered}</div>
+                                  <div className="font-bold">JPEG FILES:</div><div>{reconstructionResult.jpegFiles}</div>
+                                  <div className="font-bold">INTEGRITY:</div><div className="text-emerald-700 font-bold">{reconstructionResult.integrity}</div>
+                               </div>
+                            </div>
+                            
+                            {/* Recovered Files Table */}
+                            <div className="bg-white rounded-lg border border-slate-200 overflow-hidden shadow-sm">
+                               <div className="bg-slate-50 border-b border-slate-200 px-3 py-2 text-xs font-bold text-slate-600">RECOVERED FILES (Click Filename to Download)</div>
+                               <div className="max-h-[200px] overflow-y-auto">
+                                 <table className="w-full text-[11px] text-left border-collapse">
+                                   <thead className="bg-slate-100 text-slate-500 sticky top-0">
+                                     <tr>
+                                       <th className="px-3 py-1 border-b border-slate-200">Filename</th>
+                                       <th className="px-3 py-1 border-b border-slate-200">Type</th>
+                                       <th className="px-3 py-1 border-b border-slate-200">Size</th>
+                                       <th className="px-3 py-1 border-b border-slate-200">Cluster Chain</th>
+                                       <th className="px-3 py-1 border-b border-slate-200">SHA-256</th>
+                                       <th className="px-3 py-1 border-b border-slate-200">Status</th>
+                                     </tr>
+                                   </thead>
+                                   <tbody>
+                                     {reconstructionResult.recoveredFiles?.map((file, i) => {
+                                       const blob = new Blob([file.buffer], { type: 'image/jpeg' });
+                                       const url = URL.createObjectURL(blob);
+                                       return (
+                                       <tr key={i} className="hover:bg-slate-50 border-b border-slate-100 last:border-0">
+                                         <td className="px-3 py-1.5 font-medium text-slate-700">
+                                            <a href={url} download={file.name} className="text-[#0F8FB3] hover:underline" onClick={e => e.stopPropagation()}>{file.name}</a>
+                                         </td>
+                                         <td className="px-3 py-1.5">{file.type}</td>
+                                         <td className="px-3 py-1.5">{file.size} bytes</td>
+                                         <td className="px-3 py-1.5">{file.chain}</td>
+                                         <td className="px-3 py-1.5 truncate max-w-[100px]" title={file.sha256}>{file.sha256?.slice(0, 16)}...</td>
+                                         <td className={`px-3 py-1.5 font-bold ${file.status === 'RECOVERED' ? 'text-emerald-600' : 'text-rose-600'}`}>{file.status}</td>
+                                       </tr>
+                                       );
+                                     })}
+                                   </tbody>
+                                 </table>
+                               </div>
                             </div>
                           </div>
                         ) : (
@@ -2333,8 +2593,47 @@ export default function FileReconstruction() {
                   </div>
 
                   {/* Download Reconstructed Result Action */}
-                  <div className="pt-2">
-                    {reconstructionResult && uploadedEvidence && reconstructionResult.downloadUrl ? (
+                  <div className="pt-2 flex flex-col gap-2">
+                    {(uploadedEvidence?.fileType === 'e01' || uploadedEvidence?.fileType === 'zip') && reconstructionResult ? (
+                      <>
+                        {uploadedEvidence.fileType === 'e01' && (
+                          <button
+                            onClick={() => {
+                              const blob = new Blob([reconstructionResult.rawImageBuffer], { type: 'application/octet-stream' });
+                              const url = URL.createObjectURL(blob);
+                              const a = document.createElement('a');
+                              a.href = url;
+                              a.download = `COAD-X_LogicalDisk_${uploadedEvidence.fileName}.dd`;
+                              a.click();
+                            }}
+                            className="btn btn-cyan w-full text-xs flex items-center justify-center gap-2 py-2.5 font-semibold shadow-sm"
+                          >
+                            <Download className="w-4 h-4" />
+                            <span>DOWNLOAD RAW IMAGE</span>
+                          </button>
+                        )}
+                        <button
+                          onClick={() => {
+                            showToast(`Initiating download of ${reconstructionResult.recoveredFiles.length} files...`, 'info');
+                            reconstructionResult.recoveredFiles.forEach((file, index) => {
+                              setTimeout(() => {
+                                const blob = new Blob([file.buffer], { type: 'application/octet-stream' });
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement('a');
+                                a.href = url;
+                                a.download = file.name;
+                                a.click();
+                                setTimeout(() => URL.revokeObjectURL(url), 500);
+                              }, index * 300);
+                            });
+                          }}
+                          className="btn btn-outline w-full text-xs flex items-center justify-center gap-2 py-2.5 font-semibold shadow-sm"
+                        >
+                          <Download className="w-4 h-4" />
+                          <span>DOWNLOAD ALL RECOVERED EVIDENCE</span>
+                        </button>
+                      </>
+                    ) : reconstructionResult && uploadedEvidence && reconstructionResult.downloadUrl ? (
                       <a
                         href={reconstructionResult.downloadUrl || reconstructionResult.reconstructedDataUrl}
                         download={reconstructionResult.downloadName || `COAD-X_Reconstructed_${uploadedEvidence.fileName}`}
